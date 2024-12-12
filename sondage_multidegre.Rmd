@@ -1,0 +1,298 @@
+
+---
+title: "Analyse de Sondage à Plusieurs Degrés"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# Introduction
+
+## Contexte et source des données
+Ce projet s'inscrit dans le cadre d'une enquête agricole visant à obtenir des estimations fiables des superficies agricoles et des effectifs du cheptel au **Burundi**. Le pays est divisé en **18 provinces** et **118 communes**, et l'enquête doit être représentative au niveau provincial. 
+
+Les données utilisées proviennent du **Recensement Général de la Population et de l'Habitat, de l'Agriculture et de l'Élevage (RGPHAE)**, réalisé il y a trois ans. Ces microdonnées anonymisées, issues du module agricole, contiennent des informations sur :
+- La **superficie agricole** (en hectares).
+- Le **nombre de têtes de bétail**, synthétisé en **Unités de Taille du Bétail (UTB)**.
+
+## Problématique
+Le gouvernement souhaite élaborer une base de sondage représentative pour les enquêtes agricoles. Les défis principaux sont :
+1. **Représentativité** : L'enquête doit fournir des estimations fiables au niveau de chaque province.
+2. **Précision** : Les coefficients de variation (CV) des estimations doivent être inférieurs à 10 % pour les variables clés.
+3. **Efficacité** : La taille de l'échantillon doit être optimisée pour réduire les coûts tout en maintenant la précision.
+
+## Objectifs
+L'objectif principal est de proposer un **plan d'échantillonnage à deux degrés**, en suivant ces étapes :
+1. Nettoyer et agréger les données du module agricole au niveau des unités primaires (EA).
+2. Stratifier les unités primaires dans chaque province à l'aide d'une approche multivariée (superficie agricole et UTB).
+3. Allouer les tailles d'échantillons en utilisant la méthode d'allocation de Bankier.
+4. Sélectionner les unités primaires et les ménages agricoles selon une méthode d'échantillonnage PPS (Probability Proportional to Size).
+5. Estimer les totaux, moyennes et coefficients de variation à partir de l'échantillon sélectionné.
+
+## Description des variables
+Les principales variables utilisées dans ce projet sont :
+
+| Nom de la variable | Type   | Description                                                 |
+|---------------------|--------|-------------------------------------------------------------|
+| `province`          | Integer | Code de la province (1 à 18)                              |
+| `zone`              | Integer | Code de la zone géographique                              |
+| `ag_area`           | Double  | Superficie agricole totale (en hectares)                  |
+| `TLUs_total`        | Double  | Total des Unités de Taille du Bétail (TLUs)               |
+| `ag_holdings`       | Integer | Nombre total d'exploitations agricoles par unité primaire |
+
+## Méthodologie
+### 1. Stratification
+Les unités primaires (EA) ont été stratifiées selon :
+- **Province** : Pour assurer la représentativité au niveau provincial.
+- **Critères multivariés** : Superficie agricole (`ag_area`) et UTB (`TLUs_total`).
+
+### 2. Échantillonnage
+- **Premier degré** : Échantillonnage PPS des EA dans chaque strate.
+- **Deuxième degré** : Échantillonnage aléatoire simple (SRS) de 12 ménages agricoles dans chaque EA sélectionnée.
+
+### 3. Estimation
+- Estimation des totaux et moyennes des variables clés (`ag_area`, `TLUs_total`).
+- Calcul des erreurs d'échantillonnage, des intervalles de confiance et des coefficients de variation.
+
+## Conclusion
+Ce projet constitue une base solide pour des enquêtes agricoles représentatives et précises au niveau provincial. Les résultats permettront de mieux comprendre la répartition des ressources agricoles et d'orienter les politiques publiques en faveur du secteur agricole au Burundi.
+
+## Configuration initiale
+```{r setup, include=FALSE}
+# Configuration du répertoire de travail
+setwd("C:/Users/hp/Downloads/Projet brice/Group project_solution")
+
+# Chargement des bibliothèques nécessaires
+library(tidyverse)
+library(dplyr)
+library(samplingbook)
+library(survey)
+```
+
+## Chargement et Préparation des Données
+```{r data-preparation}
+# Chargement des données
+frame <- read.csv("phc_ag_module_clean.csv", sep = ",", dec = ",", header = TRUE, stringsAsFactors = FALSE)
+
+# Conversion des variables en numérique
+frame$ag_area <- as.numeric(frame$ag_area)
+frame$TLUs <- as.numeric(frame$TLUs)
+
+# Agrégation des données par EA
+frame_ea <- frame %>% 
+  group_by(ea) %>%
+  summarise(
+    province = first(province),
+    zone = first(zone),
+    ag_area = sum(ag_area, na.rm = TRUE),
+    TLUs_total = sum(TLUs, na.rm = TRUE),
+    ag_holdings = n(),
+    .groups = "drop"
+  )
+
+# Suppression des doublons
+frame_ea <- distinct(frame_ea)
+
+# Affichage des sorties
+cat("Résumé des données agrégées par EA :\n")
+print(head(frame_ea)) # Affiche les premières lignes du tableau agrégé
+
+cat("\nNombre total d'entités administratives (EA) : ", nrow(frame_ea), "\n")
+
+cat("\nStatistiques descriptives des zones agricoles (ag_area) par EA :\n")
+summary(frame_ea$ag_area)
+
+cat("\nStatistiques descriptives des TLUs (Total Livestock Units) par EA :\n")
+summary(frame_ea$TLUs_total)
+```
+
+## Stratification des Données
+```{r stratification}
+# Division des données par province
+frame_ea1 <- frame_ea %>% filter(province == "1")
+frame_ea2 <- frame_ea %>% filter(province == "2")
+frame_ea3 <- frame_ea %>% filter(province == "3")
+
+# Stratification par k-means pour chaque province
+set.seed(123)
+strata_domain1 <- kmeans(frame_ea1[, 4:5], 3)
+frame_ea1 <- bind_cols(frame_ea1, stratum = strata_domain1$cluster)
+
+set.seed(1231)
+strata_domain2 <- kmeans(frame_ea2[, 4:5], 3)
+frame_ea2 <- bind_cols(frame_ea2, stratum = strata_domain2$cluster)
+
+set.seed(1234)
+strata_domain3 <- kmeans(frame_ea3[, 4:5], 3)
+frame_ea3 <- bind_cols(frame_ea3, stratum = strata_domain3$cluster)
+
+# Fusion des données stratifées
+frame_ea <- bind_rows(frame_ea1, frame_ea2, frame_ea3)
+
+# Sorties de stratification
+cat("Stratification terminée.\n")
+cat("Nombre de strates par province :\n")
+cat("Province 1 : ", length(unique(frame_ea1$stratum)), " strates\n")
+cat("Province 2 : ", length(unique(frame_ea2$stratum)), " strates\n")
+cat("Province 3 : ", length(unique(frame_ea3$stratum)), " strates\n")
+
+cat("\nAperçu des données stratifées (premières lignes) :\n")
+print(head(frame_ea))
+```
+## Calcul des statistiques par strate
+```{r stratification}
+# Calcul du coefficient de variation et des totaux pour les TLUs par strate
+CV <- frame_ea %>% 
+  group_by(province, stratum) %>%
+  summarise(
+    CV = sqrt(var(ag_area, na.rm = TRUE)) / mean(ag_area, na.rm = TRUE),
+    totals_TLUs = sum(TLUs_total, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Sorties des statistiques
+cat("\nStatistiques par strate :\n")
+print(CV)
+
+cat("\nRésumé des coefficients de variation (CV) par province :\n")
+summary(CV$CV)
+
+cat("\nRésumé des totaux TLUs par strate :\n")
+summary(CV$totals_TLUs)
+
+```
+## Échantillonnage au Niveau des Entités Administratives
+```{r pps-sampling}
+set.seed(4456)
+# Échantillonnage PPS(probabiliste proportionnelle à la taille) pour la province 1
+units_pps11 <- pps.sampling(frame_ea$ag_holdings[frame_ea$province == 1 & frame_ea$stratum == 1], 16, id = frame_ea$ea[frame_ea$province == 1 & frame_ea$stratum == 1], method = "tille")
+units_pps12 <- pps.sampling(frame_ea$ag_holdings[frame_ea$province == 1 & frame_ea$stratum == 2], 16, id = frame_ea$ea[frame_ea$province == 1 & frame_ea$stratum == 2], method = "tille")
+units_pps13 <- pps.sampling(frame_ea$ag_holdings[frame_ea$province == 1 & frame_ea$stratum == 3], 19, id = frame_ea$ea[frame_ea$province == 1 & frame_ea$stratum == 3], method = "tille")
+
+# Échantillonnage PPS(probabiliste proportionnelle à la taille) pour la province 2
+units_pps21 <- pps.sampling(frame_ea$ag_holdings[frame_ea$province == 2 & frame_ea$stratum == 1], 16, id = frame_ea$ea[frame_ea$province == 2 & frame_ea$stratum == 1], method = "tille")
+units_pps22 <- pps.sampling(frame_ea$ag_holdings[frame_ea$province == 2 & frame_ea$stratum == 2], 13, id = frame_ea$ea[frame_ea$province == 2 & frame_ea$stratum == 2], method = "tille")
+units_pps23 <- pps.sampling(frame_ea$ag_holdings[frame_ea$province == 2 & frame_ea$stratum == 3], 22, id = frame_ea$ea[frame_ea$province == 2 & frame_ea$stratum == 3], method = "tille")
+
+# Échantillonnage PPS(probabiliste proportionnelle à la taille) pour la province 3
+units_pps31 <- pps.sampling(frame_ea$ag_holdings[frame_ea$province == 3 & frame_ea$stratum == 1], 14, id = frame_ea$ea[frame_ea$province == 3 & frame_ea$stratum == 1], method = "tille")
+units_pps32 <- pps.sampling(frame_ea$ag_holdings[frame_ea$province == 3 & frame_ea$stratum == 2], 16, id = frame_ea$ea[frame_ea$province == 3 & frame_ea$stratum == 2], method = "tille")
+units_pps33 <- pps.sampling(frame_ea$ag_holdings[frame_ea$province == 3 & frame_ea$stratum == 3], 19, id = frame_ea$ea[frame_ea$province == 3 & frame_ea$stratum == 3], method = "tille")
+
+# Fusionner les unités sélectionnées
+sample <- c(units_pps11$sample, units_pps12$sample, units_pps13$sample,
+            units_pps21$sample, units_pps22$sample, units_pps23$sample,
+            units_pps31$sample, units_pps32$sample, units_pps33$sample)
+
+incl_probI <- c(diag(units_pps11$PI), diag(units_pps12$PI), diag(units_pps13$PI),
+                diag(units_pps21$PI), diag(units_pps22$PI), diag(units_pps23$PI),
+                diag(units_pps31$PI), diag(units_pps32$PI), diag(units_pps33$PI))
+
+# Création d'un tableau des unités sélectionnées avec leurs probabilités d'inclusion
+sample_prob <- data.frame(ea = sample, incl_probI = incl_probI)
+
+# Sorties
+cat("\nÉchantillonnage terminé.\n")
+cat("Nombre total d'unités sélectionnées : ", length(sample), "\n")
+cat("\nAperçu des unités sélectionnées :\n")
+print(head(sample_prob))
+
+cat("\nStatistiques descriptives des probabilités d'inclusion :\n")
+summary(sample_prob$incl_probI)
+```
+
+## Échantillonnage au Niveau des Ménages
+```{r household-sampling}
+# Jointure entre le tableau des EA sélectionnées et les données initiales
+frame_EAselected <- right_join(frame, sample_ea[, c(1, 7, 8)], by = "ea")
+EA_selected <- unique(frame_EAselected$ea)
+
+# Initialisation de l'échantillon des ménages
+sample_hh_EA <- NULL
+
+# Sélection aléatoire simple de ménages dans chaque EA
+set.seed(12346)
+for (i in 1:length(EA_selected)) {
+  # Filtrer les ménages de l'EA sélectionnée
+  EAselected_hh <- frame_EAselected[frame_EAselected$ea == EA_selected[i], ]
+  
+  # Échantillonnage aléatoire simple sans remise
+  indexes <- srswor(12, dim(EAselected_hh)[1])
+  
+  # Sélectionner les ménages
+  sample_hh_EA0 <- EAselected_hh[which(indexes == 1), ]
+  sample_hh_EA0$incl_probII <- 12 / dim(EAselected_hh)[1]  # Probabilité d'inclusion au 2e degré
+  sample_hh_EA <- rbind(sample_hh_EA, sample_hh_EA0)
+}
+
+# Calcul des poids finaux
+sample_hh_EA <- sample_hh_EA %>% mutate(weights = 1 / (incl_probI * incl_probII))
+
+# Sorties
+cat("\nÉchantillonnage au 2e degré terminé.\n")
+cat("Nombre total de ménages sélectionnés : ", nrow(sample_hh_EA), "\n")
+
+cat("\nAperçu des ménages sélectionnés :\n")
+print(head(sample_hh_EA))
+
+cat("\nStatistiques descriptives des poids finaux :\n")
+summary(sample_hh_EA$weights)
+
+cat("\nStatistiques descriptives des probabilités d'inclusion au 2e degré :\n")
+summary(sample_hh_EA$incl_probII)
+```
+
+## Estimation des Totaux et Moyennes
+```{r estimation}
+# Création du plan d'enquête
+design_ag <- svydesign(
+  ids = ~ea + Id_hh,       # Niveaux d'identification
+  weights = ~weights,      # Poids calculés
+  strata = ~stratum + NULL,# Strates
+  data = sample_hh_EA      # Données échantillonnées
+)
+
+# Calcul des totaux pour les variables d'intérêt
+totals <- svytotal(~ag_area + nb_cow + nb_buffalo + nb_donkeys + nb_sheep +
+                   nb_goat + nb_pig + nb_chicken + nb_duck + TLUs, 
+                   design = design_ag)
+
+# Intervalles de confiance pour les totaux
+totals_confint <- confint(totals, level = 0.95)
+
+# Coefficients de variation des totaux
+totals_cv <- cv(totals)
+
+# Affichage des totaux et statistiques associées
+cat("\nTotaux estimés pour les variables d'intérêt :\n")
+print(totals)
+
+cat("\nIntervalles de confiance des totaux (niveau 95%) :\n")
+print(totals_confint)
+
+cat("\nCoefficients de variation des totaux :\n")
+print(totals_cv)
+
+# Calcul des moyennes pour les variables d'intérêt
+means <- svymean(~ag_area + nb_cow + nb_buffalo + nb_donkeys + nb_sheep +
+                 nb_goat + nb_pig + nb_chicken + nb_duck + TLUs, 
+                 design = design_ag)
+
+# Intervalles de confiance pour les moyennes
+means_confint <- confint(means, level = 0.95)
+
+# Coefficients de variation des moyennes
+means_cv <- cv(means)
+
+# Affichage des moyennes et statistiques associées
+cat("\nMoyennes estimées pour les variables d'intérêt :\n")
+print(means)
+
+cat("\nIntervalles de confiance des moyennes (niveau 95%) :\n")
+print(means_confint)
+
+cat("\nCoefficients de variation des moyennes :\n")
+print(means_cv)
+```
+
+
